@@ -1,0 +1,259 @@
+"""Plot ERVK3-1 expression in 3 controls and 24 pooled patients.
+
+Inputs:
+    ERVK3_1_pooled27_TPM_subjects.tsv
+        Required columns: sample, group, log2TPMplus1
+    ERVK3_1_pooled27_TPM_Wilcoxon.tsv
+        Required column: Wilcoxon_P (one row)
+
+Set OUT to the directory containing both input tables.
+The PNG and PDF are saved in the same directory.
+"""
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.lines import Line2D
+
+
+# 1. Input and output paths
+OUT = Path("path/to/ERVK3_1_TPM_results")
+
+DATA_FILE = OUT / "ERVK3_1_pooled27_TPM_subjects.tsv"
+STATS_FILE = OUT / "ERVK3_1_pooled27_TPM_Wilcoxon.tsv"
+
+df = pd.read_csv(DATA_FILE, sep="\t")
+stats = pd.read_csv(STATS_FILE, sep="\t")
+
+
+# 2. Validate subject-level data and read the saved test result
+expected = {
+    "NR_Control": 3,
+    "NR_Patient": 11,
+    "DRG_Acute": 8,
+    "DRG_Chronic": 5,
+}
+
+assert len(df) == 27
+assert df["sample"].is_unique
+assert df["group"].value_counts().to_dict() == expected
+assert len(stats) == 1
+
+df["expression"] = pd.to_numeric(df["log2TPMplus1"], errors="raise")
+assert np.isfinite(df["expression"]).all()
+
+df["Plot_group"] = np.where(
+    df["group"] == "NR_Control",
+    "Mt Sinai nerve-root controls",
+    "Pooled patients",
+)
+
+type_map = {
+    "NR_Control": "Mt Sinai nerve-root control",
+    "NR_Patient": "Mt Sinai nerve-root patient",
+    "DRG_Acute": "UT DRG acute",
+    "DRG_Chronic": "UT DRG chronic",
+}
+df["Sample_type"] = df["group"].map(type_map)
+
+controls = df.loc[
+    df["Plot_group"] == "Mt Sinai nerve-root controls", "expression"
+].to_numpy()
+
+pooled = df.loc[
+    df["Plot_group"] == "Pooled patients", "expression"
+].to_numpy()
+
+p_value = float(stats.loc[0, "Wilcoxon_P"])
+
+assert len(controls) == 3
+assert len(pooled) == 24
+assert np.isfinite(p_value)
+
+print("Controls:", len(controls))
+print("Pooled patients:", len(pooled))
+print("Control median:", np.median(controls))
+print("Pooled patient median:", np.median(pooled))
+print("Wilcoxon p:", p_value)
+
+
+# 3. Plot styles
+box_colors = {
+    "Mt Sinai nerve-root controls": "#BDBDBD",
+    "Pooled patients": "#8E24AA",
+}
+
+point_colors = {
+    "Mt Sinai nerve-root control": "#D2691E",
+    "Mt Sinai nerve-root patient": "#292929",
+    "UT DRG acute": "#199AAA",
+    "UT DRG chronic": "#199AAA",
+}
+
+point_markers = {
+    "Mt Sinai nerve-root control": "o",
+    "Mt Sinai nerve-root patient": "o",
+    "UT DRG acute": "^",
+    "UT DRG chronic": "D",
+}
+
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "font.size": 12,
+    "axes.linewidth": 1.1,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
+
+# 4. Figure layout
+fig = plt.figure(figsize=(12, 6.8))
+gs = fig.add_gridspec(1, 2, width_ratios=[3.5, 1.5], wspace=0.18)
+
+ax = fig.add_subplot(gs[0, 0])
+legend_ax = fig.add_subplot(gs[0, 1])
+legend_ax.axis("off")
+
+fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.21)
+
+
+# 5. Boxplots
+groups = ["Mt Sinai nerve-root controls", "Pooled patients"]
+
+bp = ax.boxplot(
+    [controls, pooled],
+    positions=[1, 2],
+    widths=0.48,
+    patch_artist=True,
+    showfliers=False,
+    whis=1.5,
+    boxprops={"edgecolor": "#555555", "linewidth": 1.2},
+    medianprops={"color": "#202020", "linewidth": 2.5},
+    whiskerprops={"color": "#555555", "linewidth": 1.2},
+    capprops={"color": "#555555", "linewidth": 1.2},
+)
+
+for box, group in zip(bp["boxes"], groups):
+    box.set_facecolor(box_colors[group])
+    box.set_alpha(1.0)
+
+
+# 6. Show every subject with reproducible horizontal jitter
+rng = np.random.default_rng(42)
+
+for xpos, group in enumerate(groups, start=1):
+    subset = df.loc[df["Plot_group"] == group]
+
+    for _, row in subset.iterrows():
+        sample_type = row["Sample_type"]
+        ax.scatter(
+            xpos + rng.uniform(-0.13, 0.13),
+            row["expression"],
+            s=85,
+            marker=point_markers[sample_type],
+            facecolor=point_colors[sample_type],
+            edgecolor="white",
+            linewidth=0.9,
+            zorder=5,
+        )
+
+
+# 7. Annotate the saved Wilcoxon p-value
+values = df["expression"].to_numpy()
+ymin = float(values.min())
+ymax = float(values.max())
+yrange = max(ymax - ymin, 0.5)
+
+bracket_y = ymax + 0.11 * yrange
+tick = 0.025 * yrange
+
+ax.plot(
+    [1, 1, 2, 2],
+    [bracket_y - tick, bracket_y, bracket_y, bracket_y - tick],
+    color="#333333",
+    linewidth=1.2,
+)
+
+ax.text(
+    1.5,
+    bracket_y + 0.035 * yrange,
+    rf"Wilcoxon $p$ = {p_value:.4f}",
+    ha="center",
+    va="bottom",
+    fontsize=13,
+    fontweight="bold",
+)
+
+
+# 8. Axes and labels
+ax.set_xlim(0.55, 2.45)
+ax.set_ylim(ymin - 0.08 * yrange, ymax + 0.30 * yrange)
+
+ax.set_xticks([1, 2])
+ax.set_xticklabels(
+    ["Mt Sinai nerve-root controls\n(n=3)", "Pooled patients\n(n=24)"],
+    fontsize=13,
+)
+ax.set_ylabel(r"$\log_2(\mathrm{TPM}+1)$", fontsize=15, labelpad=12)
+ax.set_title("ERVK3-1 expression", fontsize=20, fontweight="bold", pad=16)
+
+ax.grid(axis="y", color="#E5E5E5", linewidth=0.8)
+ax.set_axisbelow(True)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.tick_params(axis="x", length=0, pad=12)
+ax.tick_params(axis="y", labelsize=12)
+
+
+# 9. Sample-type legend
+handles = []
+
+for group_code, sample_type in type_map.items():
+    handles.append(
+        Line2D(
+            [0], [0],
+            marker=point_markers[sample_type],
+            linestyle="None",
+            markerfacecolor=point_colors[sample_type],
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            markersize=11,
+            label=f"{sample_type} (n={expected[group_code]})",
+        )
+    )
+
+legend = legend_ax.legend(
+    handles=handles,
+    title="Sample type",
+    loc="upper left",
+    bbox_to_anchor=(0.00, 0.85),
+    frameon=False,
+    fontsize=12,
+    title_fontsize=15,
+    labelspacing=1.6,
+    handletextpad=1.0,
+)
+legend.get_title().set_fontweight("bold")
+
+fig.text(
+    0.10,
+    0.055,
+    "Exact two-sided Wilcoxon rank-sum permutation test (unadjusted).",
+    fontsize=10,
+    color="#444444",
+)
+
+
+# 10. Save PNG and PDF
+png = OUT / "ERVK3_1_TPM_acute_chronic_NR_FINAL.png"
+pdf = OUT / "ERVK3_1_TPM_acute_chronic_NR_FINAL.pdf"
+
+fig.savefig(png, dpi=600, bbox_inches="tight", facecolor="white")
+fig.savefig(pdf, bbox_inches="tight", facecolor="white")
+
+plt.show()
+
+print("Saved:", png)
+print("Saved:", pdf)
