@@ -1,0 +1,130 @@
+# Pooled edgeR analysis: 24 patients versus 3 Mount Sinai nerve-root controls
+#
+# Patients: 11 Mount Sinai nerve-root, 8 UT DRG acute, 5 UT DRG chronic.
+# Positive logFC indicates higher expression in pooled patients.
+#
+# Inputs:
+#   raw_counts_31libraries.tsv    Raw gene counts with gene IDs in column 1
+#   metadata_31libraries.tsv      Original library metadata
+#   metadata_27_age_sex.tsv       Selected cohort with age and sex annotations
+#
+# Run: Rscript 53_Pooled27_age_sex_edgeR.R
+
+suppressPackageStartupMessages(library(edgeR))
+
+# Replace these paths before running.
+counts_file <- "path/to/raw_counts_31libraries.tsv"
+library_metadata_file <- "path/to/metadata_31libraries.tsv"
+cohort_metadata_file <- "path/to/metadata_27_age_sex.tsv"
+out_dir <- "path/to/pooled_edgeR_results"
+
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# 1. Match the 27 selected libraries to the original raw count matrix.
+counts <- as.matrix(read.delim(
+  counts_file, row.names = 1, check.names = FALSE
+))
+storage.mode(counts) <- "numeric"
+
+original_md <- read.delim(library_metadata_file, stringsAsFactors = FALSE)
+md <- read.delim(cohort_metadata_file, stringsAsFactors = FALSE)
+
+make_key <- function(d) {
+  paste(d$subject_id, d$group, d$label, sep = "|")
+}
+
+original_key <- make_key(original_md)
+selected_key <- make_key(md)
+idx <- match(selected_key, original_key)
+
+stopifnot(
+  nrow(md) == 27L,
+  !anyNA(idx),
+  !anyDuplicated(idx),
+  !anyDuplicated(original_key[original_key %in% selected_key]),
+  !anyNA(md$sample),
+  !anyDuplicated(md$sample)
+)
+
+md$original_count_column <- original_md$sample[idx]
+
+stopifnot(
+  !anyDuplicated(colnames(counts)),
+  !anyDuplicated(md$original_count_column),
+  all(md$original_count_column %in% colnames(counts))
+)
+
+counts <- counts[, md$original_count_column, drop = FALSE]
+colnames(counts) <- md$sample
+
+stopifnot(
+  all(is.finite(counts)),
+  all(counts >= 0),
+  !anyDuplicated(rownames(counts))
+)
+
+# 2. Prepare the cohort and covariates.
+md$group <- factor(
+  md$group,
+  levels = c("NR_Control", "NR_Patient", "DRG_Acute", "DRG_Chronic")
+)
+md$pool <- factor(md$pool, levels = c("Control", "Patient"))
+md$sex <- factor(tolower(md$sex), levels = c("female", "male"))
+md$age <- as.numeric(md$age)
+md$age_scaled <- as.numeric(scale(md$age))
+
+stopifnot(
+  !anyNA(md$group),
+  !anyNA(md$pool),
+  !anyNA(md$sex),
+  all(is.finite(md$age_scaled)),
+  identical(as.integer(table(md$group)), c(3L, 11L, 8L, 5L)),
+  all((md$pool == "Control") == (md$group == "NR_Control"))
+)
+
+# 3. Construct the two pooled designs.
+design_pool <- model.matrix(~ pool, data = md)
+design_adjusted <- model.matrix(~ age_scaled + sex + pool, data = md)
+
+stopifnot(
+  qr(design_pool)$rank == ncol(design_pool),
+  qr(design_adjusted)$rank == ncol(design_adjusted)
+)
+
+# 4. Filter once using the pooled design and calculate TMM factors.
+dge <- DGEList(counts = counts)
+keep <- filterByExpr(dge, design = design_pool)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(dge, method = "TMM")
+
+write.table(
+  cpm(dge, log = TRUE, prior.count = 2),
+  file.path(out_dir, "TMM_log2CPM.tsv"),
+  sep = "\t", quote = FALSE, col.names = NA
+)
+
+# 5. Fit each model and test the patient-versus-control coefficient.
+run_pooled_test <- function(dge, design, model_name) {
+  y <- estimateDisp(dge, design, robust = TRUE)
+  fit <- glmQLFit(y, design, robust = TRUE)
+  test <- glmQLFTest(fit, coef = "poolPatient")
+
+  res <- topTags(test, n = Inf)$table
+  res <- data.frame(gene_id = rownames(res), res, row.names = NULL)
+
+  write.table(
+    res,
+    file.path(out_dir, paste0(model_name, ".tsv")),
+    sep = "\t", quote = FALSE, row.names = FALSE
+  )
+
+  significant <- res$FDR < 0.05
+  cat("\nModel:", model_name, "\n")
+  cat("Tested genes:", nrow(res), "\n")
+  cat("FDR < 0.05:", sum(significant), "\n")
+  cat("Higher in pooled patients:", sum(significant & res$logFC > 0), "\n")
+  cat("Higher in controls:", sum(significant & res$logFC < 0), "\n")
+}
+
+run_pooled_test(dge, design_pool, "pooled24_vs_control3_unadjusted")
+run_pooled_test(dge, design_adjusted, "pooled24_vs_control3_age_sex_adjusted")
